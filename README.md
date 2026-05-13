@@ -72,11 +72,11 @@ Phase 1: Automated Data Collection (datacollection.ino)
 
 Designed to gather high-quality training data without manual intervention.
 
-NTP Time Sync: Connects to WiFi (RUPAMPC) to pull accurate GMT+5:30 timestamps.
+NTP Time Sync: Connects to WiFi to pull accurate GMT+5:30 timestamps.
 
 Automated State Machine: * Prep Phase: 10-second wait to allow the subject to get into posture.
 
-Collect Phase: 30-second continuous data collection at 20Hz (50ms interval).
+Collect Phase: 30-second continuous data collection at 20Hz (50ms interval). 
 
 Logging: Writes comprehensive CSV files (Projectmmwave_log.csv) directly to the SD card including distance, velocity, angle, spatial coordinates, and energy readings from both sensors.
 
