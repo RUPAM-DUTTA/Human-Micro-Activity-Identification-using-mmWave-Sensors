@@ -30,45 +30,37 @@ SIT TO STAND (Transitional)
 
 The system is built on the ESP32-S3 Pico to handle dual I2C buses, hardware serial, and SPI concurrently.
 
-Component
-
-Interface
-
-ESP32-S3 Pin
-
-Notes
-
 DFRobot C4001
 
-I2C (Bus 0)
+Interface: I2C (Bus 0)
 
-SDA: 6, SCL: 7
+ESP32-S3 Pin: SDA: 6, SCL: 7
 
-Configured for eSpeedMode
+Notes: Configured for eSpeedMode
 
 OLED (SH1106)
 
-I2C (Bus 1)
+Interface: I2C (Bus 1)
 
-SDA: 8, SCL: 9
+ESP32-S3 Pin: SDA: 8, SCL: 9
 
-Address 0x3C, displays system state
+Notes: Address 0x3C, displays system state
 
 Ai-Thinker Rd-03d
 
-UART1
+Interface: UART1
 
-RX: 4, TX: 5
+ESP32-S3 Pin: RX: 4, TX: 5
 
-Baud 256000, single-target mode
+Notes: Baud 256000, single-target mode
 
 MicroSD Module
 
-SPI
+Interface: SPI
 
-CS: 10, SCK: 12, MISO: 13, MOSI: 11
+ESP32-S3 Pin: CS: 10, SCK: 12, MISO: 13, MOSI: 11
 
-For raw CSV data logging
+Notes: For raw CSV data logging
 
 Power: The system runs independently on a rechargeable battery with an integrated power switch.
 
