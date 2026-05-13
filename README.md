@@ -1,3 +1,5 @@
+Human Micro Activity Identification Using mmWave Sensors
+
 📌 Project Overview
 
 This project focuses on identifying human micro-activities and transitional movements using advanced mmWave (millimeter-wave) radar sensors. Unlike traditional optical cameras, mmWave sensors provide a non-intrusive, privacy-preserving method for continuous activity monitoring.
@@ -6,7 +8,7 @@ By leveraging a dual-sensor approach (Ai-Thinker Rd-03d and DFRobot C4001) drive
 
 🎯 Recognized Activities
 
-The on-device Random Forest model is trained to classify the following 8 states in real-time (at 20 Hz):
+The on-device Random Forest model is trained to classify the following 8 states in real-time (at 10 Hz):
 
 NO PERSON (Empty room)
 
@@ -157,20 +159,6 @@ c4001_velocity_m_s (C4001)
 
 c4001_energy (C4001)
 
-🤝 Contributing
-
-Contributions to improve the EMA smoothing algorithms, optimize the C4001/Rd-03d parsing logic, or enhance the Random Forest model's accuracy are welcome!
-
-Fork the repository.
-
-Create a feature branch (git checkout -b feature/Optimization).
-
-Commit your changes (git commit -m 'Add EMA optimization').
-
-Push to the branch (git push origin feature/Optimization).
-
-Open a Pull Request.
-
 📝 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is open-source. Feel free to fork, modify, and integrate into your own IoT / Smart Home projects!
