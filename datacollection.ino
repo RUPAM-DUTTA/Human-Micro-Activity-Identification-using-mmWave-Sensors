@@ -11,8 +11,8 @@
 
 // ---------------- WIFI ----------------
 
-const char* WIFI_SSID = "RUPAMPC";
-const char* WIFI_PASS = "123737rd";
+const char* WIFI_SSID = "Your Wifi SSID";
+const char* WIFI_PASS = "Your Wifi password";
 
 // India Standard Time = UTC + 5:30
 const long GMT_OFFSET_SEC = 19800;
@@ -37,11 +37,9 @@ const int DAYLIGHT_OFFSET_SEC = 0;
 #define SD_MOSI 11
 
 // ---------------- TIMING & SAMPLING ----------------
-
-// 50ms interval = 20 Hz Sampling Rate
-#define C4001_INTERVAL_MS   50
+#define C4001_INTERVAL_MS   10
 #define OLED_INTERVAL_MS    200
-#define SERIAL_INTERVAL_MS  300
+#define SERIAL_INTERVAL_MS  500 // Slower serial output so we don't spam during counts
 #define SD_LOG_INTERVAL_MS  50
 
 #define WIFI_CONNECT_TIMEOUT_MS 8000
@@ -58,20 +56,52 @@ const int DAYLIGHT_OFFSET_SEC = 0;
 #define C4001_CLEAR_FRAMES      6
 #define C4001_DETECT_THRESHOLD  500
 
+// ---------------- PROTOCOL CONSTANTS ----------------
+const uint32_t PREP_TIME_SHORT_MS = 5000;    // 5s between repetitions
+const uint32_t PREP_TIME_LONG_MS = 10000;    // 10s between activities
+const uint32_t REP_COLLECTION_TIME_MS = 5000; // 5s collection per rep
+const uint32_t TOTAL_ACTIVITY_TIME_MS = 600000; // 10 minutes total per activity (600,000 ms)
+
+const int NUM_ACTIVITIES = 8;
+const char* ACTIVITY_NAMES[NUM_ACTIVITIES] = {
+  "Standing",
+  "Sitting",
+  "Sit_To_Stand",
+  "Stand_To_Sit",
+  "Walking",
+  "Entry",
+  "Exit",
+  "No_Person"
+};
+
 // ---------------- DATA COLLECTION STATES ----------------
 
 enum CollectionState {
-  STATE_IDLE,
-  STATE_PREP_WAIT,
-  STATE_COLLECTING
+  STATE_INIT,               // Wait for SD card/WiFi
+  STATE_WAIT_USER_START,    // Ask "Continue?" (Yes/No) and wait for participant setup
+  STATE_WAIT_PERSON_ID,     // Ask for Person ID (1-10)
+  STATE_WAIT_CMD,           // Ask user to enter activity number (1-8)
+  STATE_ACTIVITY_PREP_LONG, // 10s countdown before an activity begins
+  STATE_REP_PREP_SHORT,     // 5s countdown before a repetition begins
+  STATE_COLLECTING,         // Active 5s recording
+  STATE_ACTIVITY_FINISHED,  // Activity is done, close files, ask next
+  STATE_HALTED,             // User said "No" to continue
+  STATE_PAUSED              // Paused via Stop command
 };
 
-CollectionState currentState = STATE_IDLE;
+CollectionState currentState = STATE_INIT;
+CollectionState savedState = STATE_INIT; // Stores state to resume into
 uint32_t stateStartTime = 0;
+uint32_t pauseStartTime = 0; // Tracks when the system was paused
+uint32_t activityTotalTime = 0; // Tracks total collection time for current activity
 
-const uint32_t PREP_TIME_MS = 10000;       // 10 seconds wait before collection
-const uint32_t COLLECTION_TIME_MS = 30000; // 30 seconds of continuous collection
-File logFile; // Global file object for continuous high-speed writing
+int currentActivityIndex = 0;   // 0-7 (corresponds to 1-8 input)
+int currentPersonID = 1;        // Increments after a full session
+
+File logFile;
+char currentFileName[64];       // e.g., "/P1_Standing.csv"
+
+uint32_t lastPrintSec = 0;      // For clean countdown printing
 
 // ---------------- OBJECTS ----------------
 
@@ -191,26 +221,17 @@ String getDateTimeString();
 
 bool isTimeValid() {
   struct tm timeinfo;
-
-  if (!getLocalTime(&timeinfo, 100)) {
-    return false;
-  }
-
+  if (!getLocalTime(&timeinfo, 100)) return false;
   int year = timeinfo.tm_year + 1900;
   return year >= 2024;
 }
 
 bool waitForTimeSync(uint32_t timeoutMs) {
   uint32_t start = millis();
-
   while (millis() - start < timeoutMs) {
-    if (isTimeValid()) {
-      return true;
-    }
-
+    if (isTimeValid()) return true;
     delay(250);
   }
-
   return false;
 }
 
@@ -219,33 +240,25 @@ bool connectWiFi() {
     wifiOK = true;
     return true;
   }
-
   Serial.println("Connecting WiFi...");
-
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.disconnect(false, false);
   delay(200);
-
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-
   uint32_t start = millis();
-
   while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
     Serial.print(".");
   }
-
   Serial.println();
-
   if (WiFi.status() == WL_CONNECTED) {
     wifiOK = true;
     Serial.print("WiFi OK, IP: ");
     Serial.println(WiFi.localIP());
     return true;
   }
-
   wifiOK = false;
   Serial.print("WiFi failed, status: ");
   Serial.println(WiFi.status());
@@ -257,56 +270,38 @@ bool syncDateTime() {
     timeOK = false;
     return false;
   }
-
   Serial.println("Syncing time using NTP...");
-
-  configTime(
-    GMT_OFFSET_SEC,
-    DAYLIGHT_OFFSET_SEC,
-    "pool.ntp.org",
-    "time.google.com",
-    "time.nist.gov"
-  );
-
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org", "time.google.com", "time.nist.gov");
   timeOK = waitForTimeSync(TIME_SYNC_TIMEOUT_MS);
-
   if (timeOK) {
     Serial.print("Time OK: ");
     Serial.println(getDateTimeString());
   } else {
-    Serial.println("Time sync failed. Check internet access, DNS, firewall, or NTP blocking.");
+    Serial.println("Time sync failed.");
   }
-
   return timeOK;
 }
 
 void maintainWiFiAndTime() {
   static uint32_t lastWifiTry = 0;
   static uint32_t lastTimeTry = 0;
-
   uint32_t nowMs = millis();
 
   if (WiFi.status() != WL_CONNECTED) {
     wifiOK = false;
     timeOK = false;
-
     if (nowMs - lastWifiTry >= WIFI_RETRY_MS) {
       lastWifiTry = nowMs;
       connectWiFi();
     }
-
     return;
   }
-
   wifiOK = true;
-
   if (isTimeValid()) {
     timeOK = true;
     return;
   }
-
   timeOK = false;
-
   if (nowMs - lastTimeTry >= TIME_RETRY_MS) {
     lastTimeTry = nowMs;
     syncDateTime();
@@ -315,11 +310,7 @@ void maintainWiFiAndTime() {
 
 String getDateTimeString() {
   struct tm timeinfo;
-
-  if (!getLocalTime(&timeinfo, 200)) {
-    return "TIME_NOT_SYNCED";
-  }
-
+  if (!getLocalTime(&timeinfo, 200)) return "TIME_NOT_SYNCED";
   char buf[24];
   strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
   return String(buf);
@@ -329,27 +320,32 @@ String getDateTimeString() {
 
 void initSD() {
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-
   if (!SD.begin(SD_CS, SPI)) {
     Serial.println("SD card failed.");
     sdOK = false;
     return;
   }
-
   sdOK = true;
   Serial.println("SD card ready.");
+}
 
-  if (!SD.exists("/Projectmmwave_log.csv")) {
-    File f = SD.open("/Projectmmwave_log.csv", FILE_WRITE);
-    if (f) {
-      f.println(
-        "datetime,wifi,time_sync,"
+void createNewLogFile() {
+  if (!sdOK) return;
+  
+  // Create filename like /P1_Standing.csv
+  snprintf(currentFileName, sizeof(currentFileName), "/P%d_%s.csv", currentPersonID, ACTIVITY_NAMES[currentActivityIndex]);
+  
+  bool exists = SD.exists(currentFileName);
+  logFile = SD.open(currentFileName, FILE_APPEND);
+  
+  if (logFile && !exists) {
+      logFile.println(
+        "datetime,activity,wifi,time_sync,"
         "rd_present,rd_distance_mm,rd_velocity_cm_s,rd_angle_deg,rd_x_mm,rd_y_mm,"
         "c4001_present,c4001_distance_m,c4001_velocity_m_s,c4001_energy,"
         "c4001_raw_targets,c4001_raw_distance_m,c4001_raw_velocity_m_s,c4001_raw_energy"
       );
-      f.close();
-    }
+      logFile.flush();
   }
 }
 
@@ -357,6 +353,8 @@ void logToSD() {
   if (!sdOK || !logFile) return;
 
   logFile.print(getDateTimeString());
+  logFile.print(",");
+  logFile.print(ACTIVITY_NAMES[currentActivityIndex]);
   logFile.print(",");
   logFile.print(wifiOK ? 1 : 0);
   logFile.print(",");
@@ -400,7 +398,6 @@ bool c4001LooksValid(int targets, float range, float speed, int energy) {
   if (targets <= 0) return false;
   if (range < C4001_MIN_RANGE_M || range > C4001_MAX_RANGE_M) return false;
   if (energy < C4001_MIN_ENERGY) return false;
-
   return true;
 }
 
@@ -413,12 +410,7 @@ void updateC4001() {
   cData.rawSpeed = c4001.getTargetSpeed();
   cData.rawEnergy = c4001.getTargetEnergy();
 
-  bool validNow = c4001LooksValid(
-    cData.rawTargetNumber,
-    cData.rawRange,
-    cData.rawSpeed,
-    cData.rawEnergy
-  );
+  bool validNow = c4001LooksValid(cData.rawTargetNumber, cData.rawRange, cData.rawSpeed, cData.rawEnergy);
 
   if (validNow) {
     if (confirmCount < C4001_CONFIRM_FRAMES) confirmCount++;
@@ -428,13 +420,8 @@ void updateC4001() {
     confirmCount = 0;
   }
 
-  if (confirmCount >= C4001_CONFIRM_FRAMES) {
-    cData.present = true;
-  }
-
-  if (clearCount >= C4001_CLEAR_FRAMES) {
-    cData.present = false;
-  }
+  if (confirmCount >= C4001_CONFIRM_FRAMES) cData.present = true;
+  if (clearCount >= C4001_CLEAR_FRAMES) cData.present = false;
 
   if (cData.present) {
     cData.targetNumber = cData.rawTargetNumber;
@@ -450,29 +437,23 @@ void updateC4001() {
 }
 
 void printSerial() {
-  Serial.print(getDateTimeString());
-  Serial.print(" | WiFi:");
-  Serial.print(wifiOK ? "OK" : "NO");
-  Serial.print(" Time:");
-  Serial.print(timeOK ? "OK" : "NO");
+  // Only print sensor data occasionally so we don't spam during countdowns
+  if (currentState != STATE_COLLECTING) return; 
 
-  Serial.print(" | RD:");
-  Serial.print(rdTarget.present ? "YES" : "NO");
-  Serial.print(" D=");
-  Serial.print(rdTarget.distance, 0);
-  Serial.print("mm V=");
-  Serial.print(rdTarget.speed);
-  Serial.print("cm/s A=");
-  Serial.print(rdTarget.angle, 1);
-  
-  Serial.print(" | C4001:");
-  Serial.print(cData.present ? "YES" : "NO");
+  Serial.print("C4001:");
+  Serial.print(cData.present ? "Y" : "N");
   Serial.print(" D=");
   Serial.print(cData.range, 2);
   Serial.print("m V=");
   Serial.print(cData.speed, 2);
-  Serial.print("m/s E=");
-  Serial.println(cData.energy);
+  
+  Serial.print(" | RD:");
+  Serial.print(rdTarget.present ? "Y" : "N");
+  Serial.print(" D=");
+  Serial.print(rdTarget.distance, 0);
+  Serial.print("mm V=");
+  Serial.print(rdTarget.speed);
+  Serial.println("cm/s");
 }
 
 void updateDisplay() {
@@ -481,54 +462,74 @@ void updateDisplay() {
   display.setTextColor(SH110X_WHITE);
 
   display.setCursor(0, 0);
-  display.print(getDateTimeString());
+  display.print("P");
+  display.print(currentPersonID);
+  display.print(" ");
+  display.print(getDateTimeString().substring(11)); // Just time
 
-  // Show status of WiFi, Time, and CURRENT SD STATE
+  // Show status
   display.setCursor(0, 10);
-  display.print("W:");
-  display.print(wifiOK ? "OK " : "NO ");
-  display.print("SD: ");
-
-  if (!sdOK) {
-    display.print("FAIL");
-  } else if (currentState == STATE_IDLE) {
-    display.print("IDLE");
-  } else if (currentState == STATE_PREP_WAIT) {
-    int secLeft = (PREP_TIME_MS / 1000) - ((millis() - stateStartTime) / 1000);
-    if (secLeft < 0) secLeft = 0;
-    display.print("WAIT ");
-    display.print(secLeft);
-    display.print("s");
-  } else if (currentState == STATE_COLLECTING) {
-    int secLeft = (COLLECTION_TIME_MS / 1000) - ((millis() - stateStartTime) / 1000);
-    if (secLeft < 0) secLeft = 0;
-    display.print("REC ");
-    display.print(secLeft);
-    display.print("s");
-  }
+  if (!sdOK) display.print("SD:FAIL");
+  else display.print("SD:OK");
 
   display.setCursor(0, 20);
-  display.print("RD D:");
-  display.print(rdTarget.distance, 0);
-  display.print("mm V:");
-  display.print(rdTarget.speed);
+  
+  // State specific display
+  int secLeft = 0;
+  switch (currentState) {
+    case STATE_WAIT_USER_START:
+      display.print("READY? Type Yes");
+      break;
+    case STATE_WAIT_PERSON_ID:
+      display.print("Enter Person ID");
+      break;
+    case STATE_WAIT_CMD:
+      display.print("Enter Act # (1-9)");
+      break;
+    case STATE_ACTIVITY_PREP_LONG:
+      secLeft = (PREP_TIME_LONG_MS / 1000) - ((millis() - stateStartTime) / 1000);
+      display.print("PREP: ");
+      display.print(secLeft);
+      display.print("s");
+      break;
+    case STATE_REP_PREP_SHORT:
+      secLeft = (PREP_TIME_SHORT_MS / 1000) - ((millis() - stateStartTime) / 1000);
+      display.print("PREP: ");
+      display.print(secLeft);
+      display.print("s");
+      break;
+    case STATE_COLLECTING:
+      secLeft = (REP_COLLECTION_TIME_MS / 1000) - ((millis() - stateStartTime) / 1000);
+      display.print("REC: ");
+      display.print(secLeft);
+      display.print("s");
+      display.setCursor(0, 30);
+      display.print("Act: ");
+      display.print(ACTIVITY_NAMES[currentActivityIndex]);
+      break;
+    case STATE_ACTIVITY_FINISHED:
+      display.print("Activity Done");
+      break;
+    case STATE_HALTED:
+      display.print("HALTED.");
+      break;
+    case STATE_PAUSED:
+      display.print("PAUSED...");
+      break;
+    default:
+      break;
+  }
 
-  display.setCursor(0, 30);
-  display.print("RD A:");
-  display.print(rdTarget.angle, 1);
-  display.print("deg");
-
-  display.setCursor(0, 40);
-  display.print("X:");
-  display.print(rdTarget.x);
-  display.print(" Y:");
-  display.print(rdTarget.y);
-
-  display.setCursor(0, 50);
-  display.print("C D:");
-  display.print(cData.range, 2);
-  display.print("m V:");
-  display.print(cData.speed, 1);
+  // Sensor data
+  if (currentState == STATE_COLLECTING || currentState == STATE_REP_PREP_SHORT) {
+    display.setCursor(0, 40);
+    display.print("RD D:"); display.print(rdTarget.distance, 0);
+    display.print(" V:"); display.print(rdTarget.speed);
+  
+    display.setCursor(0, 50);
+    display.print("C D:"); display.print(cData.range, 2);
+    display.print(" V:"); display.print(cData.speed, 1);
+  }
 
   display.display();
 }
@@ -540,13 +541,11 @@ void setup() {
   delay(300);
 
   Serial.println("==================================================");
-  Serial.println("Starting Human Activity Identification System");
-  Serial.println("System will AUTO-RUN: 10s wait -> 30s collect -> repeat");
+  Serial.println("Protocol Data Collection System");
   Serial.println("==================================================");
 
   Wire.begin(OLED_SDA, OLED_SCL);
   Wire.setClock(400000);
-
   C4001Wire.begin(C4001_SDA, C4001_SCL);
   C4001Wire.setClock(400000);
 
@@ -565,29 +564,23 @@ void setup() {
   RDSerial.begin(RD03D_BAUD, SERIAL_8N1, RD03D_RX_PIN, RD03D_TX_PIN);
   delay(50);
   RDSerial.write(RD_SINGLE_TARGET_CMD, sizeof(RD_SINGLE_TARGET_CMD));
-  Serial.println("RD-03D single-target mode enabled.");
 
   while (!c4001.begin()) {
-    Serial.println("C4001 not found on SDA 6 / SCL 7.");
+    Serial.println("C4001 not found.");
     delay(300);
   }
-
-  Serial.println("C4001 connected.");
-
   c4001.setSensorMode(eSpeedMode);
-
-  if (c4001.setDetectThres(40, 400, C4001_DETECT_THRESHOLD)) {
-    Serial.println("C4001 detection threshold set.");
-  } else {
-    Serial.println("C4001 detection threshold failed.");
-  }
-
+  c4001.setDetectThres(40, 400, C4001_DETECT_THRESHOLD);
   c4001.setFrettingDetection(eOFF);
 
   syncDateTime();
   initSD();
 
-  Serial.println("\nSystem ready. Auto-mode starting...\n");
+  Serial.println("\nSystem initialized.");
+  currentState = STATE_WAIT_USER_START;
+  
+  // Clear serial buffer just in case
+  while(Serial.available()) Serial.read();
 }
 
 void loop() {
@@ -598,35 +591,222 @@ void loop() {
   static uint32_t lastFlush = 0;
 
   uint32_t now = millis();
+  
+  String input = "";
 
-  // 1. Fully Automated State Machine
-  if (currentState == STATE_IDLE) {
-    // Only start if SD card successfully initialized
-    if (sdOK) {
-      currentState = STATE_PREP_WAIT;
-      stateStartTime = now;
-      Serial.println("\n>>> 10-SECOND PREPARATION PHASE... GET IN POSTURE! <<<\n");
+  // --- GLOBAL COMMAND PARSING (Stop / Resume) ---
+  if (Serial.available()) {
+    input = Serial.readStringUntil('\n');
+    input.trim();
+
+    if (input.equalsIgnoreCase("Stop") || input.equalsIgnoreCase("Pause")) {
+      // Only allow pausing during active countdowns or collection
+      if (currentState == STATE_ACTIVITY_PREP_LONG || 
+          currentState == STATE_REP_PREP_SHORT || 
+          currentState == STATE_COLLECTING) {
+        
+        savedState = currentState;
+        currentState = STATE_PAUSED;
+        pauseStartTime = now;
+        
+        Serial.println("\n=========================================");
+        Serial.println(">>> SYSTEM PAUSED (STOPPED) <<<");
+        Serial.println("Type 'Resume' to continue where you left off.");
+        Serial.println("=========================================\n");
+        
+        input = ""; // Consume input so state machine doesn't process it
+        lastPrintSec = 0; // Reset print flag
+      } else if (currentState == STATE_PAUSED) {
+        Serial.println("System is already paused.");
+        input = "";
+      }
+    } 
+    else if (input.equalsIgnoreCase("Resume") || input.equalsIgnoreCase("Start")) {
+      if (currentState == STATE_PAUSED) {
+        currentState = savedState;
+        uint32_t pauseDuration = now - pauseStartTime;
+        stateStartTime += pauseDuration; // Shift the start time forward to account for the pause
+        
+        Serial.println("\n=========================================");
+        Serial.println(">>> SYSTEM RESUMED <<<");
+        Serial.println("=========================================\n");
+        
+        input = ""; // Consume input
+        lastPrintSec = 0; 
+      } else {
+        Serial.println("System is not paused.");
+        input = "";
+      }
     }
-  } else if (currentState == STATE_PREP_WAIT) {
-    if (now - stateStartTime >= PREP_TIME_MS) {
-      // 10 seconds passed, switch to data collection
-      currentState = STATE_COLLECTING;
-      stateStartTime = now; 
-      logFile = SD.open("/Projectmmwave_log.csv", FILE_APPEND);
-      Serial.println("\n>>> STARTING 30-SECOND DATA COLLECTION (20 Hz) <<<\n");
-    }
-  } else if (currentState == STATE_COLLECTING) {
-    if (now - stateStartTime >= COLLECTION_TIME_MS) {
-      // 30 seconds passed, save file and go back to waiting
-      currentState = STATE_PREP_WAIT;
-      stateStartTime = now;
+  }
+
+  // ================= STATE MACHINE =================
+  switch (currentState) {
+      
+    case STATE_WAIT_USER_START:
+      if (lastPrintSec == 0) {
+        Serial.println("\n=========================================");
+        Serial.println("Ready to begin data collection session.");
+        Serial.println("Type 'Yes' to continue or 'No' to halt.");
+        Serial.println("Note: Type 'Stop' during collection to pause, and 'Resume' to continue.");
+        Serial.println("=========================================\n");
+        lastPrintSec = 1; // Used as a flag to not repeat print
+      }
+      
+      if (input != "") {
+        if (input.equalsIgnoreCase("Yes")) {
+          currentState = STATE_WAIT_PERSON_ID;
+          lastPrintSec = 0;
+        } else if (input.equalsIgnoreCase("No")) {
+          currentState = STATE_HALTED;
+          Serial.println("System Halted.");
+        }
+      }
+      break;
+
+    case STATE_WAIT_PERSON_ID:
+      if (lastPrintSec == 0) {
+        Serial.println("\nWhich person data you want to collect? (e.g., 1, 2, 3, ... 10)");
+        Serial.println("Enter a number:");
+        lastPrintSec = 1;
+      }
+      
+      if (input != "") {
+        int pid = input.toInt();
+        if (pid > 0) {
+          currentPersonID = pid;
+          Serial.printf("\n>>> Person ID set to: P%d <<<\n", currentPersonID);
+          currentState = STATE_WAIT_CMD;
+          lastPrintSec = 0;
+        } else {
+          Serial.println("Invalid input. Please enter a valid number (e.g., 1-10).");
+        }
+      }
+      break;
+
+    case STATE_WAIT_CMD:
+      if (lastPrintSec == 0) {
+        Serial.printf("\nSelect next activity to record for Person %d:\n", currentPersonID);
+        for(int i=0; i<NUM_ACTIVITIES; i++) {
+          Serial.printf("%d. %s\n", i+1, ACTIVITY_NAMES[i]);
+        }
+        Serial.println("9. Finish this person & ask for next person");
+        Serial.println("Enter a number (1-9):");
+        lastPrintSec = 1; 
+      }
+      
+      if (input != "") {
+        int cmd = input.toInt();
+        if (cmd >= 1 && cmd <= 8) {
+          currentActivityIndex = cmd - 1;
+          
+          // Open new file for this activity
+          createNewLogFile();
+          
+          Serial.printf("\n>>> Selected: %s. Opening file: %s <<<\n", ACTIVITY_NAMES[currentActivityIndex], currentFileName);
+          currentState = STATE_ACTIVITY_PREP_LONG;
+          stateStartTime = now;
+          activityTotalTime = 0;
+          lastPrintSec = 0;
+        } else if (cmd == 9) {
+          currentState = STATE_WAIT_USER_START;
+          lastPrintSec = 0;
+        } else {
+          Serial.println("Invalid input. Enter a number between 1 and 9.");
+        }
+      }
+      break;
+
+    case STATE_ACTIVITY_PREP_LONG:
+      {
+        uint32_t elapsed = now - stateStartTime;
+        uint32_t secLeft = (PREP_TIME_LONG_MS / 1000) - (elapsed / 1000);
+        
+        if (secLeft != lastPrintSec) {
+          Serial.printf("TAKE YOUR POSITION! Activity starts in %d...\n", secLeft);
+          lastPrintSec = secLeft;
+        }
+
+        if (elapsed >= PREP_TIME_LONG_MS) {
+          currentState = STATE_COLLECTING;
+          stateStartTime = now;
+          Serial.println("\n>>> RECORDING STARTED <<<\n");
+          lastPrintSec = 0;
+        }
+      }
+      break;
+
+    case STATE_COLLECTING:
+      {
+        uint32_t elapsed = now - stateStartTime;
+        uint32_t secLeft = (REP_COLLECTION_TIME_MS / 1000) - (elapsed / 1000);
+        
+        // Print 5,4,3,2,1 during collection if desired, though usually you just want data
+        // Here we just let it run silently to not block serial.
+        
+        if (elapsed >= REP_COLLECTION_TIME_MS) {
+          activityTotalTime += REP_COLLECTION_TIME_MS;
+          
+          if (activityTotalTime >= TOTAL_ACTIVITY_TIME_MS) {
+             currentState = STATE_ACTIVITY_FINISHED;
+          } else {
+             currentState = STATE_REP_PREP_SHORT;
+             stateStartTime = now;
+             Serial.println("\n>>> RELAX. Next rep in 5 seconds... <<<\n");
+             lastPrintSec = 0;
+          }
+        }
+      }
+      break;
+
+    case STATE_REP_PREP_SHORT:
+      {
+        uint32_t elapsed = now - stateStartTime;
+        uint32_t secLeft = (PREP_TIME_SHORT_MS / 1000) - (elapsed / 1000);
+        
+        if (secLeft != lastPrintSec) {
+          Serial.printf("Prepare... %d\n", secLeft);
+          lastPrintSec = secLeft;
+        }
+
+        if (elapsed >= PREP_TIME_SHORT_MS) {
+          currentState = STATE_COLLECTING;
+          stateStartTime = now;
+          Serial.printf("\n>>> RECORDING STARTED (Total %d / %d ms) <<<\n", activityTotalTime, TOTAL_ACTIVITY_TIME_MS);
+          lastPrintSec = 0;
+        }
+      }
+      break;
+
+    case STATE_ACTIVITY_FINISHED:
       if (logFile) {
         logFile.close();
       }
-      Serial.println("\n>>> COLLECTION FINISHED. FILE SAVED. <<<\n");
-      Serial.println(">>> 10-SECOND PREPARATION PHASE... ADJUST POSTURE! <<<\n");
-    }
+      Serial.printf("\n>>> Finished 10 minutes for %s <<<\n", ACTIVITY_NAMES[currentActivityIndex]);
+      
+      // Go back and ask for next command
+      currentState = STATE_WAIT_CMD;
+      lastPrintSec = 0;
+      
+      // If you want to automatically increment person after all 8 are done, 
+      // you would need logic here to track which ones have been completed.
+      // Currently, it just drops you back to the menu to select the next one manually.
+      break;
+      
+    case STATE_HALTED:
+      // Do nothing
+      break;
+      
+    case STATE_PAUSED:
+      // Waiting for "Resume" command. Handled at the top of loop()
+      break;
+      
+    case STATE_INIT:
+    default:
+      break;
   }
+  // ================= END STATE MACHINE =================
+
 
   // 2. Normal background tasks
   readRD03D();
@@ -642,7 +822,6 @@ void loop() {
     updateDisplay();
   }
 
-  // Still print to serial to verify sensor health, regardless of state
   if (now - lastSerial >= SERIAL_INTERVAL_MS) {
     lastSerial = now;
     printSerial();
@@ -656,7 +835,7 @@ void loop() {
     }
   }
   
-  // 4. Flush file buffer to SD Card periodically (every 1 second)
+  // 4. Flush file buffer to SD Card periodically
   if (currentState == STATE_COLLECTING && now - lastFlush >= 1000) {
     lastFlush = now;
     if (logFile) {
