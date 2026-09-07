@@ -1,5 +1,5 @@
 Human Micro Activity Identification Using mmWave Sensors
-<img width="893" height="533" alt="fig_prototype_photos" src="https://github.com/user-attachments/assets/f39a346f-b94e-4bab-9133-f9a53a9f37dd" />
+<img width="393" height="333" alt="fig_prototype_photos" src="https://github.com/user-attachments/assets/f39a346f-b94e-4bab-9133-f9a53a9f37dd" />
 
 📌 Project Overview
 
