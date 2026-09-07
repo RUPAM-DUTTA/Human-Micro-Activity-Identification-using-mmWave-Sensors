@@ -1,7 +1,7 @@
 # Human Micro Activity Identification Using mmWave Sensors
 <img width="693" height="333" alt="fig_prototype_photos" src="https://github.com/user-attachments/assets/fcb05b5b-559a-4cd4-a8b8-2372ab6f796d" />
 
-📌 Project Overview
+##📌Project Overview
 
 This project focuses on identifying human micro-activities and transitional movements using advanced mmWave (millimeter-wave) radar sensors. Unlike traditional optical cameras, mmWave sensors provide a non-intrusive, privacy-preserving method for continuous activity monitoring.
 
